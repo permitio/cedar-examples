@@ -14,20 +14,22 @@
  * limitations under the License.
  */
 
+use cedar_policy::{
+    Diagnostics, EntityTypeName, ParseErrors, PolicySet, Schema, SchemaError, ValidationMode,
+    Validator,
+};
 use itertools::Itertools;
 use lazy_static::lazy_static;
-use std::path::PathBuf;
-use tracing::{info, trace};
-
-use cedar_policy::{
-    Authorizer, Context, Decision, Diagnostics, EntityTypeName, ParseErrors, PolicySet, Request,
-    Schema, SchemaError, ValidationMode, Validator,
-};
+use std::io::Cursor;
+use std::{collections::HashMap, io::Read, path::PathBuf};
 use thiserror::Error;
 use tokio::sync::{
     mpsc::{Receiver, Sender},
     oneshot,
 };
+use tracing::{error, info, log::warn, trace};
+
+use serde::{Deserialize, Serialize};
 
 use crate::{
     api::{
@@ -40,6 +42,12 @@ use crate::{
     util::{EntityUid, ListUid, Lists, TYPE_LIST},
 };
 
+#[derive(Debug, Serialize, Deserialize)]
+struct AuthDecision {
+    decision: String,
+    diagnostics: Diagnostics,
+}
+
 // There's almost certainly a nicer way to do this than having separate `sender` fields
 
 #[derive(Debug)]
@@ -47,8 +55,54 @@ pub enum AppResponse {
     GetList(Box<List>),
     Euid(EntityUid),
     Lists(Lists),
+    PolicyList(PolicySet),
+    EntityList(EntityList),
     TaskId(i64),
     Unit(()),
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EntityList(Vec<PolicyEntity>);
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PolicyEntity {
+    uid: PolicyEntityUid,
+    attrs: HashMap<String, serde_json::Value>,
+    parents: Vec<PolicyEntityUid>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PolicyAttrs {
+    // optional fields readers and editors
+    #[serde(rename = "readers")]
+    readers: Option<PolicyAttr>,
+    #[serde(rename = "editors")]
+    editors: Option<PolicyAttr>,
+    #[serde(rename = "owner")]
+    owner: Option<PolicyAttr>,
+    #[serde(rename = "name")]
+    name: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PolicyAttr {
+    #[serde(rename = "__entity")]
+    entity: PolicyEntityUid,
+    name: String,
+    tasks: Vec<PolicyEntityTask>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PolicyEntityUid {
+    #[serde(rename = "type")]
+    entity_type: String,
+    id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PolicyEntityTask {
+    #[serde(rename = "__entity")]
+    entity: PolicyEntity,
 }
 
 impl AppResponse {
@@ -110,6 +164,16 @@ impl TryInto<Lists> for AppResponse {
     }
 }
 
+impl TryInto<EntityList> for AppResponse {
+    type Error = Error;
+    fn try_into(self) -> std::result::Result<EntityList, Self::Error> {
+        match self {
+            AppResponse::EntityList(l) => Ok(l),
+            _ => Err(Error::Type),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum AppQueryKind {
     // List CRUD
@@ -132,6 +196,12 @@ pub enum AppQueryKind {
 
     // Policy Set Updates
     UpdatePolicySet(PolicySet),
+
+    // Policy Set Queries
+    GetPolicies(),
+
+    // Entity Queries
+    GetEntities(),
 }
 
 #[derive(Debug)]
@@ -183,6 +253,8 @@ lazy_static! {
     static ref ACTION_CREATE_TASK: EntityUid = r#"Action::"CreateTask""#.parse().unwrap();
     static ref ACTION_DELETE_TASK: EntityUid = r#"Action::"DeleteTask""#.parse().unwrap();
     static ref ACTION_GET_LISTS: EntityUid = r#"Action::"GetLists""#.parse().unwrap();
+    static ref ACTION_GET_POLICIES: EntityUid = r#"Action::"GetPolicies""#.parse().unwrap();
+    static ref ACTION_GET_ENTITIES: EntityUid = r#"Action::"GetEntities""#.parse().unwrap();
     static ref ACTION_GET_LIST: EntityUid = r#"Action::"GetList""#.parse().unwrap();
     static ref ACTION_CREATE_LIST: EntityUid = r#"Action::"CreateList""#.parse().unwrap();
     static ref ACTION_UPDATE_LIST: EntityUid = r#"Action::"UpdateList""#.parse().unwrap();
@@ -191,7 +263,7 @@ lazy_static! {
 
 pub struct AppContext {
     entities: EntityStore,
-    authorizer: Authorizer,
+    // authorizer: Authorizer,
     policies: PolicySet,
     recv: Receiver<AppQuery>,
 }
@@ -237,7 +309,7 @@ impl AppContext {
         let output = validator.validate(&policies, ValidationMode::default());
         if output.validation_passed() {
             info!("Validation passed!");
-            let authorizer = Authorizer::new();
+            // let authorizer = Authorizer::new();
             let (send, recv) = tokio::sync::mpsc::channel(100);
             let tx = send.clone();
             tokio::spawn(async move {
@@ -245,7 +317,7 @@ impl AppContext {
                 policy_store::spawn_watcher(policies_path, schema_path, tx).await;
                 let c = Self {
                     entities,
-                    authorizer,
+                    // authorizer,
                     policies,
                     recv,
                 };
@@ -278,6 +350,10 @@ impl AppContext {
                     AppQueryKind::AddShare(r) => self.add_share(r),
                     AppQueryKind::DeleteShare(r) => self.delete_share(r),
                     AppQueryKind::UpdatePolicySet(set) => self.update_policy_set(set),
+                    // get all policies
+                    AppQueryKind::GetPolicies() => self.get_policies(),
+                    // get all entities
+                    AppQueryKind::GetEntities() => self.get_entities(),
                 };
                 if let Err(e) = msg.sender.send(r) {
                     trace!("Failed send response: {:?}", e);
@@ -299,7 +375,50 @@ impl AppContext {
         let team_uid = list.get_team(r.role).clone();
         let target_entity = self.entities.get_user_or_team_mut(&r.share_with)?;
         target_entity.insert_parent(team_uid);
+        self.save_entities_and_sync();
         Ok(AppResponse::Unit(()))
+    }
+
+    fn get_policies(&self) -> Result<AppResponse> {
+        // self.is_authorized(&r.uid, &*ACTION_GET_POLICIES, &r.list)?;
+        Ok(AppResponse::PolicyList(self.policies.clone()))
+    }
+
+    fn get_entities(&self) -> Result<AppResponse> {
+        let es: cedar_policy::Entities = self.entities.as_entities();
+        let mut entities_c = Cursor::new(Vec::new());
+
+        let _wtj = es.write_to_json(&mut entities_c);
+        let entities_str: String = String::from_utf8(entities_c.into_inner()).unwrap();
+        let entities: EntityList = serde_json::from_str(&entities_str).unwrap();
+
+        Ok(AppResponse::EntityList(entities))
+    }
+
+    fn save_entities_and_sync(&self) {
+        // you can also send the data directly to cedar-agent
+        // let es: cedar_policy::Entities = self.entities.as_entities();
+        // let mut entities_c = Cursor::new(Vec::new());
+
+        // let _wtj = es.write_to_json(&mut entities_c);
+        // let entities_str: String = String::from_utf8(entities_c.into_inner()).unwrap();
+
+        let client = reqwest::blocking::Client::new();
+        let res = client
+            .post("http://localhost:7002/data/config")
+            .json(&serde_json::json!({
+                "entries": [{
+                    "url": "http://host.docker.internal:8080/api/entities/get",
+                    // "data": entities_str,
+                    "topics": ["policy_data"],
+                    "dst_path": ""
+                }]
+            }))
+            .send();
+        match res.is_ok() {
+            true => info!("Synced entities to cedar-agent: {:?}", res),
+            false => error!("Failed to sync entities to cedar-agent"),
+        }
     }
 
     fn delete_share(&mut self, r: DeleteShare) -> Result<AppResponse> {
@@ -308,6 +427,7 @@ impl AppContext {
         let team_uid = list.get_team(r.role).clone();
         let target_entity = self.entities.get_user_or_team_mut(&r.unshare_with)?;
         target_entity.delete_parent(&team_uid);
+        self.save_entities_and_sync();
         Ok(AppResponse::Unit(()))
     }
 
@@ -323,6 +443,7 @@ impl AppContext {
         if let Some(name) = r.name {
             task.set_name(name);
         }
+        self.save_entities_and_sync();
         Ok(AppResponse::Unit(()))
     }
 
@@ -330,6 +451,7 @@ impl AppContext {
         self.is_authorized(&r.uid, &*ACTION_CREATE_TASK, &r.list)?;
         let list = self.entities.get_list_mut(&r.list)?;
         let task_id = list.create_task(r.name);
+        self.save_entities_and_sync();
         Ok(AppResponse::TaskId(task_id))
     }
 
@@ -338,6 +460,7 @@ impl AppContext {
         let list = self.entities.get_list_mut(&r.list)?;
         list.delete_task(r.task)
             .ok_or_else(|| Error::InvalidTaskId(r.list.into(), r.task))?;
+        self.save_entities_and_sync();
         Ok(AppResponse::Unit(()))
     }
 
@@ -366,6 +489,7 @@ impl AppContext {
         let l = List::new(&mut self.entities, euid.clone(), r.uid, r.name);
         self.entities.insert_list(l);
 
+        self.save_entities_and_sync();
         Ok(AppResponse::euid(euid))
     }
 
@@ -379,12 +503,14 @@ impl AppContext {
         self.is_authorized(&r.uid, &*ACTION_UPDATE_LIST, &r.list)?;
         let list = self.entities.get_list_mut(&r.list)?;
         list.update_name(r.name);
+        self.save_entities_and_sync();
         Ok(AppResponse::Unit(()))
     }
 
     fn delete_list(&mut self, r: DeleteList) -> Result<AppResponse> {
         self.is_authorized(&r.uid, &*ACTION_DELETE_LIST, &r.list)?;
         self.entities.delete_entity(&r.list)?;
+        self.save_entities_and_sync();
         Ok(AppResponse::Unit(()))
     }
 
@@ -395,24 +521,62 @@ impl AppContext {
         action: impl AsRef<EntityUid>,
         resource: impl AsRef<EntityUid>,
     ) -> Result<()> {
-        let es = self.entities.as_entities();
-        let q = Request::new(
-            Some(principal.as_ref().clone().into()),
-            Some(action.as_ref().clone().into()),
-            Some(resource.as_ref().clone().into()),
-            Context::empty(),
-        );
+        // let es = self.entities.as_entities();
+        // let q: Request = Request::new(
+        //     Some(principal.as_ref().clone().into()),
+        //     Some(action.as_ref().clone().into()),
+        //     Some(resource.as_ref().clone().into()),
+        //     Context::empty(),
+        // );
         info!(
             "is_authorized request: principal: {}, action: {}, resource: {}",
             principal.as_ref(),
             action.as_ref(),
             resource.as_ref()
         );
-        let response = self.authorizer.is_authorized(&q, &self.policies, &es);
-        info!("Auth response: {:?}", response);
-        match response.decision() {
-            Decision::Allow => Ok(()),
-            Decision::Deny => Err(Error::AuthDenied(response.diagnostics().clone())),
+
+        // let response = self.authorizer.is_authorized(&q, &self.policies, &es);
+
+        // info!("Auth response: {:?}", response);
+        // match response.decision() {
+        //     Decision::Allow => Ok(()),
+        //     Decision::Deny => Err(Error::AuthDenied(response.diagnostics().clone())),
+        // }
+
+        // let params = [("principal", principal.as_ref().clone().to_string()),
+        //  ("action", action.as_ref().clone().to_string()),
+        //  ("resource", resource.as_ref().clone().to_string()),
+        //  ("context", "{}".to_string())
+        //  ];
+
+        let client = reqwest::blocking::Client::new();
+        let res = client
+            .post("http://localhost:8180/v1/is_authorized")
+            .json(&serde_json::json!({
+                "principal": principal.as_ref().clone().to_string(),
+                "action": action.as_ref().clone().to_string(),
+                "resource": resource.as_ref().clone().to_string(),
+                "context": {}
+            }))
+            .send();
+
+        let mut body = String::new();
+        match res {
+            Ok(mut res) => {
+                res.read_to_string(&mut body).unwrap();
+                // convert body to AuthDecision struct
+                let auth_decision: AuthDecision = serde_json::from_str(&body).unwrap();
+                info!("Auth decision: {:?}", auth_decision);
+                match auth_decision.decision.as_str() {
+                    "Allow" => return Ok(()),
+                    "Deny" => return Err(Error::AuthDenied(auth_decision.diagnostics)),
+                    _ => return Err(Error::Type),
+                }
+            }
+            Err(e) => {
+                info!("Error: {:?}", e);
+                return Err(Error::Type);
+            }
         }
     }
 }

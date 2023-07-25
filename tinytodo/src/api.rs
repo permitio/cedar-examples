@@ -18,10 +18,11 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use serde::{Deserialize, Serialize, Serializer};
 use tokio::sync::{mpsc, oneshot};
+
 use warp::Filter;
 
 use crate::{
-    context::{AppQuery, AppQueryKind, AppResponse, Error},
+    context::{AppQuery, AppQueryKind, AppResponse, EntityList, Error},
     objects::{List, TaskState},
     util::{EntityUid, ListUid, Lists, UserOrTeamUid, UserUid},
 };
@@ -122,6 +123,29 @@ impl From<GetLists> for AppQueryKind {
     }
 }
 
+// get policies
+// #[derive(Debug, Clone, Deserialize)]
+// pub struct GetPolicies {
+//     pub uid: UserUid,
+//     pub list: ListUid,
+// }
+
+// impl From<GetPolicies> for AppQueryKind {
+//     fn from(v: GetPolicies) -> AppQueryKind {
+//         AppQueryKind::GetPolicies()
+//     }
+// }
+
+// get entities
+#[derive(Debug, Clone, Deserialize)]
+pub struct GetEntities {}
+
+impl From<GetEntities> for AppQueryKind {
+    fn from(_v: GetEntities) -> AppQueryKind {
+        AppQueryKind::GetEntities()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateTask {
     pub uid: UserUid,
@@ -174,6 +198,11 @@ impl Default for Empty {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoliciesJson {
+    pub policies: String,
+}
+
 pub async fn serve_api(chan: AppChannel, port: u16) {
     let filter = warp::path("api").and(
         // List CRUD
@@ -219,6 +248,18 @@ pub async fn serve_api(chan: AppChannel, port: u16) {
                     .and_then(simple_query::<DeleteTask, Empty>)),
             ),
         )
+        // get Policies
+        // .or(warp::path("policies")
+        //     .and(warp::path("get"))
+        //     .and(with_app(chan.clone()))
+        //     .and(warp::query::query::<GetLists>())
+        //     .and_then(simple_query::<GetLists, Lists>)
+        // )
+        .or(warp::path("entities")
+            .and(warp::path("get"))
+            .and(with_app(chan.clone()))
+            .and(warp::query::query::<GetEntities>())
+            .and_then(simple_query::<GetEntities, EntityList>))
         .or(warp::path("lists")
             .and(warp::path("get"))
             .and(with_app(chan.clone()))
@@ -237,7 +278,8 @@ pub async fn serve_api(chan: AppChannel, port: u16) {
     );
 
     let s = warp::serve(filter);
-    let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), port);
+
+    let socket = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port);
     s.run(socket).await
 }
 
@@ -262,8 +304,8 @@ where
 
 fn respond(msg: Result<impl Serialize, Error>) -> impl warp::Reply {
     match msg {
-        Ok(msg) => Ok(serde_json::to_string(&msg).unwrap()),
-        Err(error) => Ok(serde_json::to_string(&ErrorMsg { error }).unwrap()),
+        Ok(msg) => Ok(warp::reply::json(&msg)),
+        Err(error) => Ok(warp::reply::json(&ErrorMsg { error })),
     }
 }
 
@@ -294,5 +336,6 @@ where
     app.send(q).await?;
     let resp = recv.await??;
     let resp = resp.try_into()?;
+
     Ok(resp)
 }

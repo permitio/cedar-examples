@@ -1,41 +1,38 @@
 # TinyTodo - OPAL and Cedar Agent fork
 
-TinyTodo is a simple application for managing task lists. It uses OPAL and Cedar agent to control who has access to what.
+TinyTodo is a simple task list management application. It uses OPAL and Cedar Agent to control who has access to what.
 
-TinyTodo allows individuals, called `Users` to organize, track, and share their todo lists. `Users` create `Lists` which they can populate with tasks. As tasks are completed, they can be checked off the list. A list's creater, called its _owner_, can share a list with either `User`s or `Team`s, either as a _reader_ or an _editor_. A reader can only view the contents of a list, while an editor can modify it (e.g., add tasks, or check them off the list).
+TinyTodo allows `Users` to organize, track, and share their to-do lists. `Users` create `Lists`, which they can populate with tasks. As tasks are completed, they can be checked off the list. A list's creator, called _owner_, can share a list with `Users` and `Teams`, assigning them with either _reader_ or _editor_ roles. A reader can only view the contents of a list, while an editor can modify it (e.g., add tasks, or check them off the list).
 
 ## What is OPAL?
 
-[OPAL stands for _Open Policy Administration Layer_](https://github.com/permitio/opal). It has two main components: a server, and a client. The server is tracking the state of the policy on Git or bundles and the Client is responsible for saving the Policy and the Data so it could evaluating the policy.
-OPAL supports multiple engines for policy evaluation such as OPA, Cedar, and more in the near future.
+[OPAL stands for_Open Policy Administration Layer_](https://github.com/permitio/opal). It has two main components: a server and a client. The server tracks the state of the policy on Git or bundles, the Client is responsible for saving the Policy and the Data so that the policy engine can evaluate the policy.
+OPAL supports multiple engines for policy evaluation, such as OPA and Cedar, with additional engine support upcoming.
 [You can read more about OPAL here](https://opal.ac).
-If you check it out we would love to [get a star from you](https://github.com/permitio/opal).
-
+You can support the project by giving it [a star on GitHub](https://github.com/permitio/opal).
 
 ## What is Cedar Agent?
 
-[Cedar Agent](https://github.com/permitio/cedar-agent) is an HTTP server designed to efficiently manage a policy store and a data store.
+[Cedar Agent](https://github.com/permitio/cedar-agent) is an HTTP server designed to manage the policy and data stores efficiently.
 It provides a seamless integration with [Cedar](https://www.cedarpolicy.com/en), a language for defining permissions as
 policies.  
 With Cedar-Agent, you can easily control and monitor access to your application's resources by leveraging Cedar
 policies.
-If you check it out we would love to [get a star from you](https://github.com/permitio/cedar-agent).
+You can support the project by giving it [a star on GitHub](https://github.com/permitio/cedar-agent).
 
 ## Permit.io
 
-[Permit.io](https://permit.io) is a platform for managing access to your application's resources. It builds on top of OPAL and Cedar Agent to provide a complete solution for managing access to your application's resources. And also it provides a UI for managing the policies and the data.
-Permit is the main contributor to OPAL and Cedar Agent, but you are more than welcome to contribute to the projects.
-
+[Permit.io](https://permit.io) is a platform for managing access to your application's resources. It builds on top of OPAL and Cedar Agent to provide a complete solution for managing access to your application's resources. Permit also provides a UI for managing the policies and the data.
 
 ## Usage
 
-The code is structured as a server, written in Rust, that processes HTTP commands. A client `tinytodo.py`, written in Python3, can be used to interact with the server. This is just a demo app, so there is no permanent storage of todo lists -- they last only as long as the server is running.
+The code is structured as a server that processes HTTP commands and is written in Rust. The client, `tinytodo.py`, written in Python3, can be used to interact with the server. As this is just a demo app, so there is no permanent storage of to-do lists -- they last only as long as the server is running.
 
 ### Build
 
 You need Docker Python3 and Rust. Rust can be installed via (rustup)[https://rustup.rs]. Python3 can be installed (here)[https://www.python.org/] or using your system's package manager. Docker can be installed (here)[https://docs.docker.com/get-docker/].
 
-Install the needed python packages, and build the server as follows. 
+Install the required python packages, and build the server as follows:
 ```shell
 pip3 install -r requirements.txt
 cargo build --release
@@ -48,13 +45,12 @@ To start opal-server and opal-client, run
 docker compose -f docker-compose-example-cedar.yml up
 ```
 
-To start the client within Python interactive mode, enter
+To start the client within Python interactive mode, enter:
 ```shell
 python3 -i ./tinytodo.py // it will start the rust server automatically and set the user as andrew (admin)
 ```
 
-
-When it starts up, the OPAL server reads in the Cedar policies in the defined github account and pass it to the `opal-client` and it pass it to `cedar-agent`, and the Cedar entities, which define the TinyTodo `User`s and `Team`s, from `data/data.json` sent as well to the `cedar-agent` by `opal`.
+The OPAL server reads Cedar policies from a pre-defined GitHub account. The policies are then passed to the OPAL client, and from there to the Cedar Agent. The Cedar entities which define the TinyTodo `Users` and `Teams` from `data/data.json` are sent to the Cedar Agent by OPAL as well.
 
 Look at the `tinytodo.py` code to see the functions you can call, which serve as the list of commands.
 ```python
@@ -68,13 +64,13 @@ share_list(list_id, "username") # share list1 with user "username"
 and more...
 ```
 
-See also [`TUTORIAL.md`](./TUTORIAL.md) for a detailed description of how to use these commands, and how TinyTodo works.
+See also [`TUTORIAL.md`](./TUTORIAL.md) for a detailed description of how to use these commands and how TinyTodo works.
 
 ## Main changes from the original TinyTodo
 
-- We are syncing the entities every time data is changed, so that the entities are always up to date. This is done by calling `save_entities_and_sync()` in `context.rs` after every change like new list created or shared.
-- We added a new route get_entities to get the entities from the app state so `OPAL` can sync them.
-- When we check for access, we only send the `user`, `action`, `resource` and `context` to the `cedar-agent`, and we don't need to send the policy and the entities every time because they are already synced by `OPAL` and `cedar-agent`.
+- Entities are synced every time data is changed, thus always keeping them up to date. This is done by calling `save_entities_and_sync()` in `context.rs` after every change (like a new list being created or shared).
+- We added a new `get_entities` route to get the entities from the app state so that OPAL can sync them.
+- When we check for access, we only send the `user`, `action`, `resource`, and `context` to the Cedar Agent. We don't need to send the policy and the entities every time as OPAL and Cedar Agent already sync them.
 ```rust
 // in context.rs
 let client = reqwest::blocking::Client::new();
